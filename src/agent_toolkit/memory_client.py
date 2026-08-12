@@ -6,17 +6,30 @@ gmail_client were — it's the actual implementation of the `agent="gretchen"` /
 `project="personal"` memory-split decision from that issue, so treat this as
 that decision landing, not infra housekeeping done on the side.
 
-`MEMORY_AGENT` and `MEMORY_DEFAULT_PROJECT` (both required, no default —
-same posture as `AGENT_DB_PATH`/`METRICS_AGENT`) replace the source's
-hardcoded `AGENT = "donna"` / `DEFAULT_PROJECT = "scoutmaster"`. Unlike
-`llm_metrics.py`'s bug, there's no storage-key collision risk here to fix —
-`agent`/`project` were already sent as explicit fields on every request to
-a server that's Postgres-authoritative and presumably partitions by them;
-only the *constants feeding those fields* needed to become configurable.
-Both getters are looked up lazily inside each function's existing
+`MEMORY_AGENT` replaces the source's hardcoded `AGENT = "donna"` — required,
+no default, same posture as `AGENT_DB_PATH`/`METRICS_AGENT`. Both getters
+are looked up lazily inside each function's existing
 try/except-and-degrade-gracefully block (an unset env var surfaces as "API
 unavailable" — a warning log and an empty/None/0 return — exactly like a
 real aiserver outage, never a hard crash at import time).
+
+`MEMORY_DEFAULT_PROJECT` replaces `DEFAULT_PROJECT = "scoutmaster"` but is
+genuinely OPTIONAL, unlike the above — found live 2026-08-12 wiring
+Gretchen (ClaudeAIScoutMaster#277): the API's project-partitioning
+(`services/api/projects.py`) only exists for Donna's multi-domain memory;
+"most agents get one collection and no further division" per that module's
+own docstring. `services/api/main.py`'s `/search` and `/recent` handlers
+both 400 on a project value for an agent that isn't registered in
+`PROJECTS` — treating an unrecognized project as a likely typo, not a
+no-op (asymmetric with `/remember`'s `resolve_project`, which silently
+drops it either way). Requiring every consumer to invent a project value
+therefore actively broke every search/recent call for a single-domain
+agent. `_default_project()` returns `None` when unset — a legitimate value
+call sites pass straight through, matching "omitting this searches across
+everything" for `/search`/`/recent`. Donna's own behavior is unchanged
+(she always sets `MEMORY_DEFAULT_PROJECT=scoutmaster`); only consumers
+that leave it unset are affected, and for those this fixes a live bug
+rather than changing working behavior.
 
 Two sets of hardcoded values are deliberately NOT parameterized, kept as
 literals: `agent="harvey"` in `search_shared_memory`/`list_shared_memory`/
@@ -69,11 +82,11 @@ def _agent() -> str:
     return agent
 
 
-def _default_project() -> str:
-    project = os.getenv("MEMORY_DEFAULT_PROJECT", "")
-    if not project:
-        raise RuntimeError("MEMORY_DEFAULT_PROJECT must be set (e.g. 'personal', 'scoutmaster')")
-    return project
+def _default_project() -> str | None:
+    """None for single-domain agents (no MEMORY_DEFAULT_PROJECT set) — a
+    legitimate value meaning "no project filter", not a misconfiguration.
+    See the module docstring for why this must NOT raise like _agent()."""
+    return os.getenv("MEMORY_DEFAULT_PROJECT") or None
 
 
 def _get_http_client() -> httpx.Client:

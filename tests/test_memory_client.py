@@ -9,15 +9,20 @@ def _memory_env(monkeypatch):
     monkeypatch.setenv("MEMORY_DEFAULT_PROJECT", "scoutmaster")
 
 
-def test_agent_and_default_project_required(monkeypatch):
+def test_agent_required(monkeypatch):
     monkeypatch.delenv("MEMORY_AGENT", raising=False)
     with pytest.raises(RuntimeError):
         mc._agent()
 
-    monkeypatch.setenv("MEMORY_AGENT", "donna")
+
+def test_default_project_is_none_when_unset(monkeypatch):
+    # Not required, unlike _agent() — a single-domain agent (e.g. gretchen)
+    # legitimately has no MEMORY_DEFAULT_PROJECT, and the API's /search and
+    # /recent both treat an absent project as "search everything", not an
+    # error. Requiring one broke every search/recent call for such an agent
+    # (found live wiring Gretchen, ClaudeAIScoutMaster#277).
     monkeypatch.delenv("MEMORY_DEFAULT_PROJECT", raising=False)
-    with pytest.raises(RuntimeError):
-        mc._default_project()
+    assert mc._default_project() is None
 
 
 def test_store_memory_degrades_to_zero_when_agent_unset(monkeypatch):
