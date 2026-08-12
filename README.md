@@ -77,6 +77,26 @@ by future agents too, not scout- or Donna-specific.
   prepended comment cleanly) — fine for Donna, who owns both, but a future
   Gmail-only consumer would need its own implementation. Flagged in the
   module docstring rather than silently redesigned.
+- `agent_toolkit.query_log` — durable log of every question asked
+  (`log_query(chat_id, question, lane, status, duration_ms)`, never raises).
+  No generalizing needed beyond the `agent_toolkit.database` swap — it
+  already wrote to a plain `query_log` table with no agent name baked in;
+  the source's neighboring `donna_tool_calls` table (a different, still
+  Donna-hardcoded log — see "Not here yet") is written by `app/ai/ai_tools.py`,
+  not this module, despite a docstring mention that made it look coupled.
+- `agent_toolkit.llm_metrics` — cross-process Prometheus-format `/metrics`
+  counters (tokens/calls/duration histograms) via Redis, for exposing an
+  agent's own LLM call volume. Real fix here, not just a rename: the source
+  hardcoded `AGENT = "donna"` as a *render-time label only* — the
+  underlying Redis keys were fixed strings (`llm_metrics:tokens`, etc.), so
+  a second agent sharing the same Redis (the default `REDIS_URL` has no
+  per-agent override) would have its counters silently merged into the
+  first agent's, then reported entirely under the first agent's label.
+  `METRICS_AGENT` (required, no default — same posture as `AGENT_DB_PATH`)
+  is now baked into the storage keys themselves
+  (`llm_metrics:{agent}:tokens`), not just the output. Regression-tested:
+  two agents recording through the same fake Redis produce non-overlapping
+  `render()` output.
 
 ## Test-isolation pattern (recommended for consumers)
 
@@ -94,22 +114,28 @@ file" at the package level).
 Deliberately left out — either not yet fully bot-agnostic in the source
 repo, or blocked on splitting a source file that mixes generic and
 agent-specific code:
-- `llm_metrics.py` — has a hardcoded `AGENT = "donna"` constant tied to
-  aiserver-stack#70's `/metrics` endpoint; needs generalizing to accept an
-  agent name before it can be shared.
-- `query_log.py` — writes to a `donna_tool_calls` table name; needs a
-  parameterized table name (or per-consumer table) before extraction.
-- **`icloud_mcp.py`** (iMessage/Reminders/Calendar MCP bridge client) — same
-  shape of blocker Gmail had: it bundles the generic MCP bridge core with a
-  ScoutMasterHub-specific tool (the troop task board), so `calendar_mcp.py`/
-  `imessage_mcp.py`/`reminders_mcp.py` (which all import from it) can't be
-  cleanly extracted until that split happens too.
+- **`icloud_mcp.py`** (iMessage/Reminders/Calendar MCP bridge client) —
+  **correction (2026-08-12): not actually a Phase 1 blocker.** An earlier
+  pass here flagged this as bundling the generic MCP bridge core with a
+  ScoutMasterHub-specific tool; reading the full file shows that's wrong —
+  the only ScoutMasterHub mention is one line of *prompt text* telling the
+  LLM not to confuse Apple Reminders with the troop task board, not
+  embedded tool logic. The real reason this isn't ported: per
+  ClaudeAIScoutMaster#277's decisions, Donna keeps *sole* ownership of
+  iMessage/Calendar/Reminders — Gretchen has zero duties here — so there is
+  no second consumer to extract this for. Revisit only if a future agent
+  actually needs one of these MCP bridges.
 - `memory.py` (aiserver Qdrant client) — hardcodes `AGENT = "donna"` and
-  `DEFAULT_PROJECT = "scoutmaster"` at module level. Generalizing this one
-  isn't pure mechanical extraction — it's the actual implementation of the
-  `agent="gretchen"` / `project="personal"` memory-split decision from
-  ClaudeAIScoutMaster#277, so it's deferred to that work rather than done
-  here as infra housekeeping.
+  `DEFAULT_PROJECT = "scoutmaster"` at module level, the same shape of
+  problem `llm_metrics.py` had (label vs. storage-key scoping needs
+  checking too). Generalizing this one isn't pure mechanical extraction
+  though — it's the actual implementation of the `agent="gretchen"` /
+  `project="personal"` memory-split decision from ClaudeAIScoutMaster#277,
+  so it's deferred to that work rather than done here as infra
+  housekeeping.
+- `app/ai/ai_tools.py`'s `donna_tool_calls` logging — tied up in the
+  monolithic tool-catalog file itself (ClaudeAIScoutMaster#277 blocker #2),
+  not a standalone extraction candidate.
 
 All tracked on ClaudeAIScoutMaster#277.
 

@@ -14,6 +14,7 @@ dependencies = [
     "slowapi",
     "google-auth",
     "google-api-python-client",
+    "redis",
 ]
 
 [tool.setuptools.packages.find]
