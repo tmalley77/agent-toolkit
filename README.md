@@ -97,6 +97,32 @@ by future agents too, not scout- or Donna-specific.
   (`llm_metrics:{agent}:tokens`), not just the output. Regression-tested:
   two agents recording through the same fake Redis produce non-overlapping
   `render()` output.
+- `agent_toolkit.memory_client` — HTTP client for aiserver's shared semantic
+  memory API (search/store/delete, HOA search, camp recipes, event
+  debriefs, Ollama-based reranking). **This one is the actual
+  implementation of the `agent="gretchen"` / `project="personal"`
+  memory-split decision from ClaudeAIScoutMaster#277**, not routine infra
+  housekeeping — `MEMORY_AGENT`/`MEMORY_DEFAULT_PROJECT` (both required, no
+  default) replace the source's hardcoded `AGENT = "donna"` /
+  `DEFAULT_PROJECT = "scoutmaster"`. No storage-key collision risk to fix
+  here unlike `llm_metrics.py` — `agent`/`project` were already sent as
+  explicit fields on every request to a server that already partitions by
+  them; only the constants feeding those fields needed to become
+  configurable. Two things deliberately kept as hardcoded literals, not
+  parameterized: `agent="harvey"` in the `*_shared_memory` functions
+  (Harvey's own synced notes — a fixed resource, not per-consumer) and
+  `project="hoa_westmoreland"` in the HOA functions (Donna-only domain per
+  #277, no reason to make it configurable for a domain only one consumer
+  has). One deliberate value change: the source's reranker's `OLLAMA_URL`
+  default was a specific Tailscale IP baked into ClaudeAIScoutMaster's own
+  infra; replaced with a generic `http://localhost:11434` default here,
+  since a shared package hardcoding one consumer's specific host makes no
+  sense — every real consumer should set `OLLAMA_URL` explicitly anyway.
+  **Not wired into any live consumer** — porting this does not touch
+  donna-workspace's live `app/memory.py`, which still hardcodes AGENT/
+  DEFAULT_PROJECT today; that swap is a real production behavior change
+  (every memory-reliant feature routes through it) and belongs with the
+  actual Donna/Gretchen cutover, not bundled into an extraction pass.
 
 ## Test-isolation pattern (recommended for consumers)
 
@@ -125,14 +151,6 @@ agent-specific code:
   iMessage/Calendar/Reminders — Gretchen has zero duties here — so there is
   no second consumer to extract this for. Revisit only if a future agent
   actually needs one of these MCP bridges.
-- `memory.py` (aiserver Qdrant client) — hardcodes `AGENT = "donna"` and
-  `DEFAULT_PROJECT = "scoutmaster"` at module level, the same shape of
-  problem `llm_metrics.py` had (label vs. storage-key scoping needs
-  checking too). Generalizing this one isn't pure mechanical extraction
-  though — it's the actual implementation of the `agent="gretchen"` /
-  `project="personal"` memory-split decision from ClaudeAIScoutMaster#277,
-  so it's deferred to that work rather than done here as infra
-  housekeeping.
 - `app/ai/ai_tools.py`'s `donna_tool_calls` logging — tied up in the
   monolithic tool-catalog file itself (ClaudeAIScoutMaster#277 blocker #2),
   not a standalone extraction candidate.
