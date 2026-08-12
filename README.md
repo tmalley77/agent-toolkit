@@ -43,20 +43,40 @@ by future agents too, not scout- or Donna-specific.
   `OUTLOOK_ENV_PATH` (default `.env` in the cwd) — the original located its
   env file via a path relative to its own source file, which breaks once
   this lives in an installed package.
+- `agent_toolkit.gmail_client` — Gmail REST API client (fetch/search/send/
+  reply/draft/quoted-reply, OAuth token refresh with cross-process file
+  locking). `GMAIL_TOKEN_DIR` (default cwd) replaces the same kind of
+  `__file__`-relative default-path bug `outlook_client` had. Quoted-reply
+  rendering uses `agent_toolkit.email_html` (see below) instead of the
+  source's `app.sdk_workers.email_draft`.
+- `agent_toolkit.email_html` — pure HTML/markdown/plain-text conversion
+  helpers with zero app dependencies (safe-subset HTML sanitizing, markdown
+  fallback rendering, quoted-reply assembly, HTML-to-preview-text). Split
+  out of ClaudeAIScoutMaster's `app/sdk_workers/email_draft.py`, which mixed
+  these with heavily troop/Donna-coupled content generation — that split
+  (ClaudeAIScoutMaster commit 634be3b) is what unblocked `gmail_client`.
 - `agent_toolkit.mailbox` — `MailboxClient` ABC + `Email` dataclass +
   registry-based `get_mailbox()`/`register_mailbox()` factory, plus
-  `agent_toolkit.mailbox.outlook.OutlookMailbox`, the Outlook implementation.
-  One behavioral change from the ClaudeAIScoutMaster source: the original
-  factory hardcoded the three mailbox names from Donna's pre-split setup
-  (`outlook`/`troop_gmail`/`personal_gmail`); this one is registry-based
-  instead, so each consumer registers only the mailbox names it actually
-  owns (`register_mailbox("outlook", OutlookMailbox)`, etc.) — see the
-  module docstring for the exact API. Also fixes a real bug found during
-  porting (ClaudeAIScoutMaster#278): the source's 404-as-success handling
-  checked `requests.exceptions.HTTPError`, but the client it wraps raises
-  `httpx`'s exception type, so the check never matched and a message that
-  was already gone was treated as a hard failure instead. Covered by a
-  regression test (`tests/test_mailbox.py`).
+  `agent_toolkit.mailbox.outlook.OutlookMailbox` and
+  `agent_toolkit.mailbox.gmail.GmailMailbox`. One behavioral change from the
+  ClaudeAIScoutMaster source: the original factory hardcoded the three
+  mailbox names from Donna's pre-split setup (`outlook`/`troop_gmail`/
+  `personal_gmail`); this one is registry-based instead, so each consumer
+  registers only the mailbox names it actually owns
+  (`register_mailbox("outlook", OutlookMailbox)`, etc.) — see the module
+  docstring for the exact API. Also fixes a real bug found while porting the
+  Outlook path (ClaudeAIScoutMaster#278): the source's 404-as-success
+  handling checked `requests.exceptions.HTTPError`, but the client it wraps
+  raises `httpx`'s exception type, so the check never matched and a message
+  that was already gone was treated as a hard failure instead — covered by
+  a regression test. (The Gmail path's equivalent check was already correct
+  in the source — it uses `googleapiclient`'s own `HttpError` throughout,
+  no mismatch there.) `GmailMailbox.forward()` carries over a real
+  behavioral coupling from the source, not fixed: it forwards by sending
+  through `OutlookMailbox` (Gmail has no API-level forward that preserves a
+  prepended comment cleanly) — fine for Donna, who owns both, but a future
+  Gmail-only consumer would need its own implementation. Flagged in the
+  module docstring rather than silently redesigned.
 
 ## Test-isolation pattern (recommended for consumers)
 
@@ -79,25 +99,11 @@ agent-specific code:
   agent name before it can be shared.
 - `query_log.py` — writes to a `donna_tool_calls` table name; needs a
   parameterized table name (or per-consumer table) before extraction.
-- **Gmail client (`gmail_client.py`, `mailbox/gmail.py`)** — blocked on a
-  dependency, not just naming: both lazily import HTML-quoting helpers
-  (`build_quoted_reply_html`, `plain_text_to_quoted_html`,
-  `html_to_preview_text`, `_plain_text_to_html`, `_ensure_email_html`) from
-  ClaudeAIScoutMaster's `app/sdk_workers/email_draft.py` — itself a monolith
-  mixing those generic, dependency-free string utilities (roughly its first
-  220 lines) with heavily troop/Donna-context-coupled content-generation
-  functions (`draft_email`, `draft_meeting_reminder`, `draft_reply`, which
-  pull in `app.ai.assistant`, `app.memory`, `app.database`, and make LLM
-  calls). The Outlook path avoided this entirely — Graph's own `createReply`
-  API returns the quoted original server-side, no local HTML quoting needed
-  — which is why `outlook_client`/`mailbox.outlook` could ship without it.
-  Extracting Gmail cleanly means splitting `email_draft.py`'s pure HTML
-  utilities into their own module first.
 - **`icloud_mcp.py`** (iMessage/Reminders/Calendar MCP bridge client) — same
-  shape of blocker: it bundles the generic MCP bridge core with a
+  shape of blocker Gmail had: it bundles the generic MCP bridge core with a
   ScoutMasterHub-specific tool (the troop task board), so `calendar_mcp.py`/
   `imessage_mcp.py`/`reminders_mcp.py` (which all import from it) can't be
-  cleanly extracted until that split happens either.
+  cleanly extracted until that split happens too.
 - `memory.py` (aiserver Qdrant client) — hardcodes `AGENT = "donna"` and
   `DEFAULT_PROJECT = "scoutmaster"` at module level. Generalizing this one
   isn't pure mechanical extraction — it's the actual implementation of the
