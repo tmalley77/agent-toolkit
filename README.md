@@ -31,6 +31,32 @@ by future agents too, not scout- or Donna-specific.
   (`enc`/`dec`), keyed by `DB_ENCRYPTION_KEY`. Falls back to plaintext with a
   one-time warning if the key isn't set; `dec()` tolerates pre-migration
   plaintext rows.
+- `agent_toolkit.auth` — single-user Telegram identity gate
+  (`is_allowed_sender`, checks `TELEGRAM_ALLOWED_USER_ID` by default, or any
+  env var name you pass) + `make_audit_log(logger_name, high_consequence_tools)`,
+  which returns an `audit_log(update, tool_name)` bound to *your* logger name
+  and *your* tool set — Donna's and Gretchen's high-consequence tools (and
+  audit log streams) are expected to differ.
+- `agent_toolkit.outlook_client` — Microsoft Graph API client for a single
+  Outlook mailbox (fetch/search/send/reply/draft/forward, OAuth token
+  refresh). One env var beyond the source it was ported from:
+  `OUTLOOK_ENV_PATH` (default `.env` in the cwd) — the original located its
+  env file via a path relative to its own source file, which breaks once
+  this lives in an installed package.
+- `agent_toolkit.mailbox` — `MailboxClient` ABC + `Email` dataclass +
+  registry-based `get_mailbox()`/`register_mailbox()` factory, plus
+  `agent_toolkit.mailbox.outlook.OutlookMailbox`, the Outlook implementation.
+  One behavioral change from the ClaudeAIScoutMaster source: the original
+  factory hardcoded the three mailbox names from Donna's pre-split setup
+  (`outlook`/`troop_gmail`/`personal_gmail`); this one is registry-based
+  instead, so each consumer registers only the mailbox names it actually
+  owns (`register_mailbox("outlook", OutlookMailbox)`, etc.) — see the
+  module docstring for the exact API. Also fixes a real bug found during
+  porting (ClaudeAIScoutMaster#278): the source's 404-as-success handling
+  checked `requests.exceptions.HTTPError`, but the client it wraps raises
+  `httpx`'s exception type, so the check never matched and a message that
+  was already gone was treated as a hard failure instead. Covered by a
+  regression test (`tests/test_mailbox.py`).
 
 ## Test-isolation pattern (recommended for consumers)
 
@@ -45,19 +71,41 @@ file" at the package level).
 
 ## Not here yet
 
-Deliberately left out of the first extraction pass — either not yet fully
-bot-agnostic in the source repo, or not yet audited:
+Deliberately left out — either not yet fully bot-agnostic in the source
+repo, or blocked on splitting a source file that mixes generic and
+agent-specific code:
 - `llm_metrics.py` — has a hardcoded `AGENT = "donna"` constant tied to
   aiserver-stack#70's `/metrics` endpoint; needs generalizing to accept an
   agent name before it can be shared.
 - `query_log.py` — writes to a `donna_tool_calls` table name; needs a
   parameterized table name (or per-consumer table) before extraction.
-- Mailbox/API clients (`gmail_client`, `outlook_client`, `mailbox/`),
-  MCP bridge clients (`icloud_mcp`, `calendar_mcp`, `imessage_mcp`,
-  `reminders_mcp`), `memory.py` (aiserver Qdrant API client), and the
-  Telegram single-user auth gate (`auth/telegram_gate.py`) are all
-  candidates for a second extraction pass — tracked on
-  ClaudeAIScoutMaster#277.
+- **Gmail client (`gmail_client.py`, `mailbox/gmail.py`)** — blocked on a
+  dependency, not just naming: both lazily import HTML-quoting helpers
+  (`build_quoted_reply_html`, `plain_text_to_quoted_html`,
+  `html_to_preview_text`, `_plain_text_to_html`, `_ensure_email_html`) from
+  ClaudeAIScoutMaster's `app/sdk_workers/email_draft.py` — itself a monolith
+  mixing those generic, dependency-free string utilities (roughly its first
+  220 lines) with heavily troop/Donna-context-coupled content-generation
+  functions (`draft_email`, `draft_meeting_reminder`, `draft_reply`, which
+  pull in `app.ai.assistant`, `app.memory`, `app.database`, and make LLM
+  calls). The Outlook path avoided this entirely — Graph's own `createReply`
+  API returns the quoted original server-side, no local HTML quoting needed
+  — which is why `outlook_client`/`mailbox.outlook` could ship without it.
+  Extracting Gmail cleanly means splitting `email_draft.py`'s pure HTML
+  utilities into their own module first.
+- **`icloud_mcp.py`** (iMessage/Reminders/Calendar MCP bridge client) — same
+  shape of blocker: it bundles the generic MCP bridge core with a
+  ScoutMasterHub-specific tool (the troop task board), so `calendar_mcp.py`/
+  `imessage_mcp.py`/`reminders_mcp.py` (which all import from it) can't be
+  cleanly extracted until that split happens either.
+- `memory.py` (aiserver Qdrant client) — hardcodes `AGENT = "donna"` and
+  `DEFAULT_PROJECT = "scoutmaster"` at module level. Generalizing this one
+  isn't pure mechanical extraction — it's the actual implementation of the
+  `agent="gretchen"` / `project="personal"` memory-split decision from
+  ClaudeAIScoutMaster#277, so it's deferred to that work rather than done
+  here as infra housekeeping.
+
+All tracked on ClaudeAIScoutMaster#277.
 
 ## Install
 
