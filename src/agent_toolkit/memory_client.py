@@ -40,6 +40,24 @@ instance belongs to) and `project="hoa_westmoreland"` in `search_hoa`/
 decisions — no reason to make it configurable for a domain only one
 consumer has).
 
+A third fixed cross-agent read, added 2026-08-12 (Tom: "she needs access to
+scoutmaster memory like donna"): `search_donna_scoutmaster_memory` hardcodes
+`agent="donna", project="scoutmaster"` — read-only access into Donna's
+existing troop-knowledge partition (1000+ documents accumulated before the
+Donna/Gretchen split) for Gretchen, same shape as `search_shared_memory`.
+Deliberately read-through, not a data migration — Donna's collection stays
+the source of truth, nothing copied into `gretchen_memories`. A real
+migration (Gretchen owns it outright, Donna stops seeing it) was the
+original split plan's language ("agent=gretchen migrated from
+agent=donna/project=scoutmaster") but is a much bigger, less reversible
+data operation on 1000+ live documents — deferred as a separate decision,
+not assumed here. Known related gap, not fixed as part of this: Donna's
+own `MEMORY_DEFAULT_PROJECT` is still `scoutmaster` (line ~30 above) even
+though she no longer handles scout mail post-split — every new memory she
+writes without an explicit project override still lands in the same
+partition this function reads, so Gretchen would see Donna's ongoing
+personal content bleed into "scoutmaster" unless that's fixed separately.
+
 Not yet wired into any live consumer — porting this does not change
 donna-workspace's live `app/memory.py`, which still hardcodes AGENT/
 DEFAULT_PROJECT today. That swap is real production behavior change (every
@@ -263,6 +281,25 @@ def search_shared_memory(query: str, top_k: int = 5) -> list[dict]:
         return [_hit_to_dict(h) for h in r.json()["hits"]]
     except Exception as e:
         logger.warning("search_shared_memory failed for query %r: %s", query[:60], e)
+        return []
+
+
+def search_donna_scoutmaster_memory(query: str, top_k: int = 5) -> list[dict]:
+    """Semantic search over Donna's existing "scoutmaster" project partition
+    (troop knowledge accumulated before the Donna/Gretchen split). Returns
+    [] on error or if the API is unavailable — same degrade-gracefully
+    contract as search_memory. Deliberately hardcoded to
+    agent="donna", project="scoutmaster" for every consumer — see the
+    module docstring. Read-only: this does not write into the calling
+    agent's own collection, so results are not remembered as this agent's
+    own memory unless the caller explicitly stores them."""
+    try:
+        r = _api_post("/search", {
+            "query": query, "agent": "donna", "project": "scoutmaster", "limit": top_k,
+        })
+        return [_hit_to_dict(h) for h in r.json()["hits"]]
+    except Exception as e:
+        logger.warning("search_donna_scoutmaster_memory failed for query %r: %s", query[:60], e)
         return []
 
 

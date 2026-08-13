@@ -74,6 +74,24 @@ def test_search_shared_memory_always_uses_harvey_regardless_of_consumer(monkeypa
     assert "project" not in body
 
 
+def test_search_donna_scoutmaster_memory_always_uses_donna_project_regardless_of_consumer(monkeypatch):
+    calls = _capture_post(monkeypatch)
+    mc.search_donna_scoutmaster_memory("troop meeting notes")
+
+    path, body = calls[0]
+    assert path == "/search"
+    assert body["agent"] == "donna"
+    assert body["project"] == "scoutmaster"
+
+
+def test_search_donna_scoutmaster_memory_never_raises_on_api_error(monkeypatch):
+    def raising_post(path, json):
+        raise Exception("aiserver unreachable")
+
+    monkeypatch.setattr(mc, "_api_post", raising_post)
+    assert mc.search_donna_scoutmaster_memory("anything") == []
+
+
 def test_search_memory_filters_out_sent_comm_and_recipe_types(monkeypatch):
     def fake_api_post(path, json):
         class _Resp:
