@@ -29,7 +29,29 @@ from agent_toolkit.http_retry import retry_http
 
 GRAPH = "https://graph.microsoft.com/v1.0"
 TOKEN_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
-SCOPES = "https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/Notes.Read offline_access"
+# Requested on every refresh, so it must match what the app registration
+# actually has consented — asking for a scope the app does not hold fails the
+# exchange outright rather than degrading.
+#
+# Overridable per consumer (aiserver-stack#142). Gretchen needs the troop
+# OneNote notebook and nothing else; the default set would hand her
+# Mail.ReadWrite and Mail.Send on Tom's personal mailbox, which is Donna's
+# domain and a capability her container has no business holding. The default
+# is unchanged, so Donna, hoa-ingest and wod-ingest keep today's behaviour
+# without touching their config.
+#
+# Scoping the *request* is only half of it: Microsoft records consent per
+# (user, application), so a token minted against an app that already holds
+# Mail.* can generally be redeemed for those scopes regardless of what is
+# asked for here. A genuinely mail-less credential needs its own app
+# registration too — this variable cannot provide that on its own.
+DEFAULT_SCOPES = (
+    "https://graph.microsoft.com/Mail.ReadWrite "
+    "https://graph.microsoft.com/Mail.Send "
+    "https://graph.microsoft.com/Notes.Read "
+    "offline_access"
+)
+SCOPES = os.getenv("OUTLOOK_SCOPES", "").strip() or DEFAULT_SCOPES
 
 # Defense-in-depth: re-validate at the send boundary so a malformed address
 # (or a name accidentally passed as the address) can't ever reach Graph.
