@@ -194,16 +194,11 @@ class GmailMailbox(MailboxClient):
         from agent_toolkit.mailbox.outlook import OutlookMailbox
 
         # Fetch full message to get headers + body
-        service = gmail_client._get_service(self.token_env)
-        msg = service.users().messages().get(
-            userId="me", id=msg_id, format="full"
-        ).execute()
-
-        headers = msg.get("payload", {}).get("headers", [])
-        orig_from = gmail_client._get_header(headers, "From")
-        orig_subject = gmail_client._get_header(headers, "Subject") or "(no subject)"
-        orig_date = gmail_client._get_header(headers, "Date")
-        orig_body = gmail_client._extract_body_from_payload(msg.get("payload", {}))
+        raw = gmail_client.get_message_raw(msg_id, token_env=self.token_env)
+        orig_from = raw["from"]
+        orig_subject = raw["subject"]
+        orig_date = raw["date"]
+        orig_body = raw["body"]
 
         fwd_subject = orig_subject if orig_subject.lower().startswith("fwd:") else f"Fwd: {orig_subject}"
         fwd_body_parts = []

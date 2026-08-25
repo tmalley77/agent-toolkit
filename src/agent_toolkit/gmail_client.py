@@ -18,7 +18,9 @@ for `send_message`/`create_quoted_reply_draft` come from
 """
 import base64
 import fcntl
+import functools
 import html
+import inspect
 import logging
 import os
 import re
@@ -37,6 +39,30 @@ _DEFAULT_TOKEN_PATHS = {
     "GMAIL_TOKEN_TROOP": "data/gmail_token_troop.json",
     "GMAIL_TOKEN_PERSONAL": "data/gmail_token_personal.json",
 }
+
+
+def _imap_backed(fn):
+    """Route to gmail_imap's same-named function when the account named by
+    `token_env` has app-password env vars set (GMAIL_ADDRESS_<acct> +
+    GMAIL_APP_PASSWORD_<acct>).
+
+    donna-workspace#311: Google expires OAuth refresh tokens after 7 days on
+    unverified apps requesting restricted Gmail scopes — publishing to
+    Production doesn't clear it, only CASA verification would. IMAP/SMTP with
+    an app password has no such fuse. The OAuth REST path below stays intact
+    as the per-account fallback, so the switch is a pure env-var toggle.
+    """
+    sig = inspect.signature(fn)
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        from agent_toolkit import gmail_imap
+        bound = sig.bind(*args, **kwargs)
+        bound.apply_defaults()
+        if gmail_imap.is_configured(bound.arguments.get("token_env", "")):
+            return getattr(gmail_imap, fn.__name__)(*args, **kwargs)
+        return fn(*args, **kwargs)
+    return wrapper
 
 
 def _token_dir() -> Path:
@@ -157,6 +183,7 @@ def _get_header(headers: list[dict], name: str) -> str:
     return ""
 
 
+@_imap_backed
 def list_labels(token_env: str = "GMAIL_TOKEN_TROOP") -> list[str]:
     """Return all user-created label names (excludes system labels)."""
     service = _get_service(token_env)
@@ -193,6 +220,7 @@ def _parse_message(service, msg_id: str) -> dict:
     }
 
 
+@_imap_backed
 def fetch_unread(
     limit: int = 10,
     token_env: str = "GMAIL_TOKEN_TROOP",
@@ -213,6 +241,7 @@ def fetch_unread(
     return [_parse_message(service, msg_id) for msg_id in message_ids]
 
 
+@_imap_backed
 def search_messages(
     keyword: str,
     sender: str | None = None,
@@ -249,6 +278,7 @@ def search_messages(
     return [_parse_message(service, msg_id) for msg_id in message_ids]
 
 
+@_imap_backed
 def mark_read(msg_id: str, token_env: str = "GMAIL_TOKEN_TROOP") -> None:
     """Remove UNREAD label from a message."""
     service = _get_service(token_env)
@@ -259,6 +289,7 @@ def mark_read(msg_id: str, token_env: str = "GMAIL_TOKEN_TROOP") -> None:
     ).execute()
 
 
+@_imap_backed
 def archive_message(msg_id: str, token_env: str = "GMAIL_TOKEN_TROOP") -> None:
     """Archive a message (remove from inbox)."""
     service = _get_service(token_env)
@@ -269,12 +300,14 @@ def archive_message(msg_id: str, token_env: str = "GMAIL_TOKEN_TROOP") -> None:
     ).execute()
 
 
+@_imap_backed
 def trash_message(msg_id: str, token_env: str = "GMAIL_TOKEN_TROOP") -> None:
     """Move a message to trash."""
     service = _get_service(token_env)
     service.users().messages().trash(userId="me", id=msg_id).execute()
 
 
+@_imap_backed
 def apply_label(msg_id: str, label_name: str, token_env: str = "GMAIL_TOKEN_TROOP") -> None:
     """Apply a label to a message and remove from inbox. Creates label if it doesn't exist."""
     service = _get_service(token_env)
@@ -299,6 +332,7 @@ def apply_label(msg_id: str, label_name: str, token_env: str = "GMAIL_TOKEN_TROO
     ).execute()
 
 
+@_imap_backed
 def send_message(
     to_address: str,
     subject: str,
@@ -354,6 +388,7 @@ def send_message(
     ).execute()
 
 
+@_imap_backed
 def create_draft(
     to_address: str,
     subject: str,
@@ -416,6 +451,7 @@ def _extract_html_from_payload(payload: dict) -> str:
     return ""
 
 
+@_imap_backed
 def create_quoted_reply_draft(
     source_msg_id: str,
     body_html: str,
@@ -472,6 +508,7 @@ def create_quoted_reply_draft(
     return result.get("id", "")
 
 
+@_imap_backed
 def create_draft_new(
     to_address: str,
     subject: str,
@@ -499,6 +536,7 @@ def create_draft_new(
     return result.get("id", "")
 
 
+@_imap_backed
 def list_drafts(limit: int = 20, token_env: str = "GMAIL_TOKEN_TROOP") -> list[dict]:
     """List up to `limit` drafts sitting unsent in this mailbox's Drafts
     folder, newest-modified first. Returns [{"to","subject","last_modified"}]."""
@@ -529,6 +567,7 @@ def list_drafts(limit: int = 20, token_env: str = "GMAIL_TOKEN_TROOP") -> list[d
     return results
 
 
+@_imap_backed
 def send_draft(draft_id: str, token_env: str = "GMAIL_TOKEN_TROOP") -> None:
     """Send an existing Gmail draft by ID — sends whatever is currently saved."""
     service = _get_service(token_env)
@@ -537,6 +576,7 @@ def send_draft(draft_id: str, token_env: str = "GMAIL_TOKEN_TROOP") -> None:
     ).execute()
 
 
+@_imap_backed
 def update_draft(
     draft_id: str,
     to_address: str,
@@ -561,3 +601,21 @@ def update_draft(
     service.users().drafts().update(
         userId="me", id=draft_id, body={"message": {"raw": raw}}
     ).execute()
+
+
+@_imap_backed
+def get_message_raw(msg_id: str, token_env: str = "GMAIL_TOKEN_TROOP") -> dict:
+    """Headers + plain body of one message, for forward composition —
+    public so mailbox forward() implementations don't reach into
+    _get_service (which the IMAP backend has no equivalent of)."""
+    service = _get_service(token_env)
+    msg = service.users().messages().get(
+        userId="me", id=msg_id, format="full"
+    ).execute()
+    headers = msg.get("payload", {}).get("headers", [])
+    return {
+        "from": _get_header(headers, "From"),
+        "subject": _get_header(headers, "Subject") or "(no subject)",
+        "date": _get_header(headers, "Date"),
+        "body": _extract_body_from_payload(msg.get("payload", {})),
+    }
