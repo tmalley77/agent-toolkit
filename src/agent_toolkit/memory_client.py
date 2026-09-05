@@ -452,16 +452,32 @@ def store_document(source_path: str, text: str, kind: str, metadata: dict = None
 
 
 def _rerank(query: str, results: list[dict], top_k: int) -> list[dict]:
-    """Re-rank search results using a small local model via Ollama. Falls
+    """Re-rank search results using the host's local model via Ollama. Falls
     back to original order on error — a direct Ollama call, not something
-    aiserver's API does for the caller."""
+    aiserver's API does for the caller.
+
+    `think: False` is not optional. A thinking-capable model left to its own
+    default spends the whole 30 s budget on hidden chain-of-thought and never
+    emits the array, which this function then swallows as "rerank failed" and
+    returns the original order — a silent, permanent no-op that looks like a
+    working rerank. Measured on aiserver 2026-09-05: gemma4:12b exceeded 60 s
+    without the flag, 1.2 s with it. Non-thinking models accept and ignore it.
+    """
     if len(results) <= 1:
         return results[:top_k]
     import httpx as _httpx
     import json as _json
     import time as _time
     OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-    RERANK_MODEL = os.getenv("RERANK_MODEL", "phi4-mini")
+    # Default is the host's resident generation model rather than a second,
+    # smaller one. aiserver-stack#158: a separate rerank model has to fit
+    # beside the resident set, and on a 12 GB card it no longer does — with
+    # gemma4:12b (8.1 GB) + bge-m3 (0.66 GB) pinned, loading phi4-mini
+    # (3.1 GB) evicted BOTH of them, so every search reranked at the cost of
+    # a full reload of the models the box actually keeps warm. Reusing the
+    # already-resident model costs no VRAM at all. Override RERANK_MODEL only
+    # with something measured to fit alongside the host's resident set.
+    RERANK_MODEL = os.getenv("RERANK_MODEL", "gemma4:12b-it-q4_K_M")
     numbered = "\n".join(f"{i+1}. {r.get('text', '')[:200]}" for i, r in enumerate(results))
     prompt = (
         f"Given the search query: \"{query}\"\n\n"
@@ -471,7 +487,7 @@ def _rerank(query: str, results: list[dict], top_k: int) -> list[dict]:
     )
     _t0 = _time.perf_counter()
     try:
-        resp = _httpx.post(f"{OLLAMA_URL}/api/generate", json={"model": RERANK_MODEL, "prompt": prompt, "stream": False}, timeout=30)
+        resp = _httpx.post(f"{OLLAMA_URL}/api/generate", json={"model": RERANK_MODEL, "prompt": prompt, "stream": False, "think": False}, timeout=30)
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:

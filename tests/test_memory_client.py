@@ -134,3 +134,53 @@ def test_store_document_project_override_beats_default(monkeypatch):
 
     _, body = calls[0]
     assert body["project"] == "custom_project"
+
+
+def _capture_rerank_post(monkeypatch):
+    """Run _rerank against a stubbed Ollama, returning the JSON body sent."""
+    sent = {}
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"response": "[2,1]"}
+
+    def _fake_post(url, json=None, timeout=None):
+        sent["url"] = url
+        sent["body"] = json
+        return _Resp()
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "post", _fake_post)
+    results = [{"text": "first"}, {"text": "second"}]
+    mc._rerank("q", results, top_k=2)
+    return sent
+
+
+def test_rerank_disables_thinking(monkeypatch):
+    # aiserver-stack#158. Without think=False a thinking-capable model spends
+    # the entire timeout on hidden chain-of-thought and never returns the
+    # array, and _rerank's except-branch swallows that into "original order".
+    # The rerank then silently does nothing forever, which is indistinguishable
+    # from a working one at the call site. Measured on aiserver: gemma4:12b
+    # exceeded 60s without the flag, 1.2s with it.
+    sent = _capture_rerank_post(monkeypatch)
+    assert sent["body"]["think"] is False
+
+
+def test_rerank_defaults_to_the_resident_model(monkeypatch):
+    # A second, smaller rerank model has to fit beside the host's resident set;
+    # on a 12 GB card loading phi4-mini (3.1 GB) beside gemma4:12b + bge-m3
+    # evicted both. Reusing the resident model costs no VRAM.
+    monkeypatch.delenv("RERANK_MODEL", raising=False)
+    sent = _capture_rerank_post(monkeypatch)
+    assert sent["body"]["model"] == "gemma4:12b-it-q4_K_M"
+
+
+def test_rerank_model_is_overridable(monkeypatch):
+    monkeypatch.setenv("RERANK_MODEL", "phi4-mini")
+    sent = _capture_rerank_post(monkeypatch)
+    assert sent["body"]["model"] == "phi4-mini"
