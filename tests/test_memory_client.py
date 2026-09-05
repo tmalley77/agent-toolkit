@@ -55,6 +55,42 @@ def test_store_memory_sends_configured_agent_and_project(monkeypatch):
     assert body["project"] == "scoutmaster"
 
 
+def test_search_handbook_requests_the_handbook_kind_server_side(monkeypatch):
+    calls = _capture_post(monkeypatch)
+    mc.search_handbook("knife safety", top_k=7)
+
+    path, body = calls[0]
+    assert path == "/search"
+    assert body["agent"] == "gretchen"
+    assert body["project"] == "scoutmaster"
+    assert body["kind"] == "handbook"
+    assert body["limit"] == 7
+
+
+def test_search_handbook_returns_hits_flattened(monkeypatch):
+    def fake_api_post(path, json):
+        class _Resp:
+            def json(self):
+                return {"hits": [
+                    {"score": 0.9, "text": "Safe Knife Use",
+                     "metadata": {"chapter": 12, "title": "Tools"}, "project": "troop208"},
+                ]}
+        return _Resp()
+
+    monkeypatch.setattr(mc, "_api_post", fake_api_post)
+    results = mc.search_handbook("knife safety")
+    assert results == [{"score": 0.9, "text": "Safe Knife Use",
+                        "chapter": 12, "title": "Tools", "project": "troop208"}]
+
+
+def test_search_handbook_degrades_to_empty_list_on_error(monkeypatch):
+    def raise_error(path, json):
+        raise RuntimeError("API unavailable")
+
+    monkeypatch.setattr(mc, "_api_post", raise_error)
+    assert mc.search_handbook("knife safety") == []
+
+
 def test_search_hoa_uses_hardcoded_project_but_configured_agent(monkeypatch):
     calls = _capture_post(monkeypatch)
     mc.search_hoa("water heater")

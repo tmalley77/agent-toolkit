@@ -324,6 +324,28 @@ def search_camp_recipes(query: str, top_k: int = 10, meal_type: str = None, cook
         return []
 
 
+def search_handbook(query: str, top_k: int = 5) -> list[dict]:
+    """Semantic search over the ingested BSA Scout Handbook (kind="handbook",
+    3514 chunks, one-time ingest -- no store_memory() call in this codebase
+    writes this kind). Unlike search_memory, this DOES return handbook
+    points: they carry no metadata.memory_type at all, so search_memory's
+    memory_type filter always excludes every one of them regardless of
+    which type is requested (gretchen-workspace#12 follow-up -- "the
+    handbook must already be searchable" turned out to be true for the
+    data, false for every consumer, since nothing ever asked for kind=
+    "handbook" specifically). Mirrors search_camp_recipes' server-side kind
+    filter. Returns [] on error or if the API is unavailable."""
+    try:
+        r = _api_post("/search", {
+            "query": query, "agent": _agent(), "project": _default_project(),
+            "kind": "handbook", "limit": top_k,
+        })
+        return [_hit_to_dict(h) for h in r.json()["hits"]]
+    except Exception as e:
+        logger.warning("search_handbook failed for %r: %s", query[:60], e)
+        return []
+
+
 def search_hoa(query: str, top_k: int = 5) -> list[dict]:
     """Semantic search over HOA content. Read-only — writes happen through a
     separate ingest path. Returns [] on any error. Deliberately hardcoded to
