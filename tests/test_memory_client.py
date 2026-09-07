@@ -146,6 +146,41 @@ def test_store_document_returns_fail_loud_error_dict(monkeypatch):
     assert result == {"ok": False, "error": "api down"}
 
 
+def test_store_document_relays_a_real_timeout_exceptions_message(monkeypatch):
+    """Regression test for the exact live failure (2026-09-07): a large PDF
+    ingested right after bge-m3 moved to CPU inference (~3-4x slower per
+    embedded chunk) blew past the client's timeout and store_document
+    surfaced str(exc) == "timed out" verbatim, matching httpx's own
+    TimeoutException message -- this is what the fail-loud contract above
+    actually produces for a real network timeout, not just a generic
+    RuntimeError."""
+    import httpx
+
+    def raises(*a, **k):
+        raise httpx.TimeoutException("timed out")
+
+    monkeypatch.setattr(mc, "_api_post", raises)
+    result = mc.store_document("path/to/doc", "text", kind="document")
+
+    assert result == {"ok": False, "error": "timed out"}
+
+
+def test_http_client_timeout_is_90s_not_30s(monkeypatch):
+    """Regression test (2026-09-07): store_document failed live on a real
+    multi-page PDF ("timed out") once bge-m3 moved from GPU to CPU
+    inference -- CPU embedding is ~3-4x slower per chunk, and a big
+    document's aggregate embed time crossed the old 30s ceiling. 90s is
+    the fix; this pins the actual configured value so a future edit can't
+    silently drop it back down."""
+    monkeypatch.setattr(mc, "_client", None)
+    client = mc._get_http_client()
+    try:
+        assert client.timeout.connect == 90
+        assert client.timeout.read == 90
+    finally:
+        monkeypatch.setattr(mc, "_client", None)
+
+
 def test_store_document_project_override_beats_default(monkeypatch):
     calls = _capture_post(monkeypatch)
     mc.store_document("path", "text", kind="document", project="custom_project")

@@ -103,7 +103,20 @@ def _get_http_client() -> httpx.Client:
     global _client
     if _client is None:
         auth = (CADDY_USER, CADDY_PASSWORD) if CADDY_USER and CADDY_PASSWORD else None
-        _client = httpx.Client(base_url=AISERVER_API_URL, auth=auth, timeout=30)
+        # 90s (was 30s, 2026-09-07): store_document failed live on a real
+        # multi-page PDF ("timed out") right after bge-m3 (the embedding
+        # model every /remember chunk goes through) moved from GPU to CPU
+        # inference — CPU embedding is ~3-4x slower per chunk, and a big
+        # document's aggregate embed time crossed 30s where it hadn't
+        # before. Shared by every call through _api_post (search/recent too,
+        # not just /remember) since there's one client; that's fine — none
+        # of these calls should legitimately hang forever, and a longer
+        # ceiling only matters when something's already slow. Kept below
+        # the bridge's own outer 120s timeout on POST /ingest/document
+        # (ondemand/bridge.py's _fmt_ingest_document) so this more specific
+        # "timed out" error wins the race and surfaces before that call's
+        # own, less specific timeout would.
+        _client = httpx.Client(base_url=AISERVER_API_URL, auth=auth, timeout=90)
     return _client
 
 
