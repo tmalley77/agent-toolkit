@@ -1,0 +1,56 @@
+# Nothing ran this suite on a push until 2026-09-20. It has 114 tests and five
+# repos install this package from `main`, so a break here reaches Donna,
+# Gretchen, WestmorelandFamsHOA, WateronDemand and the aiserver stack on their
+# next unrelated rebuild (donna-workspace#361 phase 0).
+name: test
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # In a container as the invoking user with bytecode off, the same shape
+      # ScoutMasterHub and the donna suites use: a root-owned __pycache__ left
+      # in a mounted tree is unremovable by the login user afterwards
+      # (aiserver-stack#57/#59).
+      - name: Run pytest
+        run: |
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e PYTHONDONTWRITEBYTECODE=1 \
+            -e HOME=/tmp \
+            -v "$PWD:/app" \
+            -w /app \
+            python:3.12-slim \
+            bash -c 'pip install --quiet --no-cache-dir -e . pytest && exec python -m pytest -q'
+
+      - name: Assert no root-owned files were left behind
+        run: |
+          found=$(find . -user root -print -quit)
+          if [ -n "$found" ]; then
+            echo "root-owned file left in the tree: $found" >&2
+            exit 1
+          fi
+
+  # Consumers pin `@vX.Y.Z`, so a tag that does not match the version in
+  # pyproject.toml means the thing they installed is not the thing that was
+  # released. Checked when a tag is pushed rather than on every push to main,
+  # which would fail for the whole window between a release and the next bump.
+  tag-matches-version:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag must match pyproject version
+        run: |
+          v=$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
+          tag="${GITHUB_REF#refs/tags/v}"
+          echo "pyproject: $v   tag: $tag"
+          [ "$v" = "$tag" ] || { echo "tag v$tag does not match version $v" >&2; exit 1; }

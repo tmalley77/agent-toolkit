@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-toolkit"
-version = "0.1.0"
+version = "0.2.0"
 description = "Shared Python infra for Tom Malley's agent fleet (Donna, Gretchen, and future agents): SQLite session/DB helpers, HTTP retry, PII field encryption."
 requires-python = ">=3.11"
 dependencies = [

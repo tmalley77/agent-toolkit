@@ -5,7 +5,33 @@ assistant) and Gretchen (Troop Assistant Scoutmaster), split out of
 `ClaudeAIScoutMaster` (see ClaudeAIScoutMaster#276, #277). Meant to be reused
 by future agents too, not scout- or Donna-specific.
 
-## What's here (v0.1.0)
+## Installing it
+
+Pin a tag, never `main`:
+
+```
+agent-toolkit @ git+https://github.com/tmalley77/agent-toolkit.git@v0.2.0
+```
+
+Five repos install this package. Until 2026-09-20 all five pinned `@main`, which
+meant a push here reached every one of them on its next unrelated rebuild and
+nothing recorded what any of them had. See CHANGELOG.md.
+
+## Releasing
+
+1. Land the change on `main` with CI green.
+2. Bump `version` in `pyproject.toml` and move the CHANGELOG's Unreleased
+   entries under the new heading.
+3. Tag `vX.Y.Z` and push the tag. CI refuses a tag that does not match
+   `pyproject.toml`.
+4. Bump the pin in each consumer deliberately — that is the point of the tag.
+   Consumers today: donna-workspace, aiserver-stack (`services/donna`,
+   `services/gretchen`), WestmorelandFamsHOA, WateronDemand.
+
+Pre-1.0, a breaking change bumps the **minor** version.
+
+
+## What's here
 
 - `agent_toolkit.database` — SQLite connection helper. Reads its DB path from
   `AGENT_DB_PATH` (no default — each consumer points this at its own file,
