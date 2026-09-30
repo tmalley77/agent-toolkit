@@ -89,3 +89,96 @@ def test_get_access_token_persists_rotated_refresh_token(tmp_path, monkeypatch):
     assert token == "access-123"
     assert os.environ["OUTLOOK_REFRESH_TOKEN"] == "rotated-token"
     assert "OUTLOOK_REFRESH_TOKEN=rotated-token" in env_file.read_text()
+
+
+# --------------------------------------------------------------------- #
+# Category tagging + path-aware folder moves (donna-workspace#371)
+# --------------------------------------------------------------------- #
+
+from unittest.mock import MagicMock, patch
+
+
+def _resp(json_body, status=200):
+    r = MagicMock()
+    r.status_code = status
+    r.json.return_value = json_body
+    r.raise_for_status.return_value = None
+    return r
+
+
+@patch.object(oc, "_get_access_token", return_value="tok")
+def test_add_category_appends_without_touching_read_state(_tok):
+    with patch.object(oc.httpx, "get", return_value=_resp({"categories": ["Blue"]})), \
+         patch.object(oc.httpx, "patch", return_value=_resp({})) as p:
+        oc.add_category("m1", "Action Required")
+    # only the categories property changes -- no isRead, no folder move
+    assert p.call_args.kwargs["json"] == {"categories": ["Blue", "Action Required"]}
+
+
+@patch.object(oc, "_get_access_token", return_value="tok")
+def test_add_category_idempotent(_tok):
+    with patch.object(oc.httpx, "get", return_value=_resp({"categories": ["Action Required"]})), \
+         patch.object(oc.httpx, "patch") as p:
+        oc.add_category("m1", "Action Required")
+    p.assert_not_called()
+
+
+@patch.object(oc, "_get_access_token", return_value="tok")
+def test_remove_category_strips_only_that_category(_tok):
+    with patch.object(oc.httpx, "get", return_value=_resp({"categories": ["Action Required", "Blue"]})), \
+         patch.object(oc.httpx, "patch", return_value=_resp({})) as p:
+        oc.remove_category("m1", "Action Required")
+    assert p.call_args.kwargs["json"] == {"categories": ["Blue"]}
+
+
+@patch.object(oc, "_get_access_token", return_value="tok")
+def test_remove_category_absent_is_noop(_tok):
+    with patch.object(oc.httpx, "get", return_value=_resp({"categories": []})), \
+         patch.object(oc.httpx, "patch") as p:
+        oc.remove_category("m1", "Action Required")
+    p.assert_not_called()
+
+
+@patch.object(oc, "mark_read")
+@patch.object(oc, "_get_access_token", return_value="tok")
+def test_move_to_folder_resolves_parent_child_path(_tok, _mr):
+    # "Scouting/General": parent found top-level, child found under it --
+    # the old top-level-only lookup missed the child and created a bogus
+    # top-level folder named "Scouting/General".
+    gets = [
+        _resp({"value": [{"id": "F-scouting", "displayName": "Scouting"}]}),
+        _resp({"value": [{"id": "F-general", "displayName": "General"}]}),
+    ]
+    with patch.object(oc.httpx, "get", side_effect=gets) as g, \
+         patch.object(oc.httpx, "post", return_value=_resp({})) as p:
+        oc.move_to_folder("m1", "Scouting/General")
+    assert "F-scouting/childFolders" in g.call_args_list[1][0][0]
+    assert p.call_args.kwargs["json"] == {"destinationId": "F-general"}
+
+
+@patch.object(oc, "mark_read")
+@patch.object(oc, "_get_access_token", return_value="tok")
+def test_move_to_folder_creates_missing_child_under_parent(_tok, _mr):
+    gets = [
+        _resp({"value": [{"id": "F-scouting", "displayName": "Scouting"}]}),
+        _resp({"value": []}),  # child missing
+    ]
+    posts = [
+        _resp({"id": "F-new-child"}),  # created under parent
+        _resp({}),                     # the move
+    ]
+    with patch.object(oc.httpx, "get", side_effect=gets), \
+         patch.object(oc.httpx, "post", side_effect=posts) as p:
+        oc.move_to_folder("m1", "Scouting/General")
+    assert "F-scouting/childFolders" in p.call_args_list[0][0][0]
+    assert p.call_args_list[1].kwargs["json"] == {"destinationId": "F-new-child"}
+
+
+@patch.object(oc, "mark_read")
+@patch.object(oc, "_get_access_token", return_value="tok")
+def test_move_to_folder_flat_name_unchanged(_tok, _mr):
+    with patch.object(oc.httpx, "get", return_value=_resp({"value": [{"id": "F-fin", "displayName": "Finance"}]})) as g, \
+         patch.object(oc.httpx, "post", return_value=_resp({})) as p:
+        oc.move_to_folder("m1", "Finance")
+    assert g.call_args_list[0][0][0].endswith("/me/mailFolders")
+    assert p.call_args.kwargs["json"] == {"destinationId": "F-fin"}

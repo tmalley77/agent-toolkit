@@ -12,6 +12,17 @@ While this package is pre-1.0, a breaking change bumps the **minor** version.
 
 ## Unreleased
 
+## v0.2.2 — 2026-09-30
+
+- `outlook_client`: `add_category()` / `remove_category()` — tag a message by
+  category name without touching folder or read state (donna-workspace#371's
+  Outlook "Action Required"; works with the mail scope alone — no
+  MailboxSettings needed).
+- `outlook_client`: `move_to_folder()` now resolves "Parent/Child" paths the
+  way `list_folders()` renders them. The old top-level-only lookup missed
+  nested folders and silently created a bogus top-level folder with the
+  slashed name.
+
 ## v0.2.1 — 2026-09-29
 
 - `gmail_client`/`gmail_imap`: `add_label()` / `remove_label()` — tag a message

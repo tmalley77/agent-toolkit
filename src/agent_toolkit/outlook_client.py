@@ -650,30 +650,46 @@ def archive_message(uid: str) -> None:
     mark_read(uid)
 
 
-def move_to_folder(uid: str, folder_name: str) -> None:
-    """Move a message to a named folder, creating it if it doesn't exist."""
-    token = _get_access_token()
-
+def _find_or_create_folder(token: str, name: str, parent_id: str | None = None) -> str:
+    """Resolve a folder by displayName under `parent_id` (top level when None),
+    creating it there if missing. Returns the folder id."""
+    base = (f"{GRAPH}/me/mailFolders/{parent_id}/childFolders"
+            if parent_id else f"{GRAPH}/me/mailFolders")
     r = httpx.get(
-        f"{GRAPH}/me/mailFolders",
+        base,
         headers={"Authorization": f"Bearer {token}"},
-        params={"$filter": f"displayName eq '{folder_name}'"},
+        params={"$filter": f"displayName eq '{name}'"},
         timeout=10,
     )
     r.raise_for_status()
     folders = r.json().get("value", [])
-
     if folders:
-        folder_id = folders[0]["id"]
-    else:
-        r = httpx.post(
-            f"{GRAPH}/me/mailFolders",
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json={"displayName": folder_name},
-            timeout=10,
-        )
-        r.raise_for_status()
-        folder_id = r.json()["id"]
+        return folders[0]["id"]
+    r = httpx.post(
+        base,
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json={"displayName": name},
+        timeout=10,
+    )
+    r.raise_for_status()
+    return r.json()["id"]
+
+
+def move_to_folder(uid: str, folder_name: str) -> None:
+    """Move a message to a named folder, creating it if it doesn't exist.
+
+    `folder_name` may be a "Parent/Child" path, matching how list_folders()
+    renders nesting — the old top-level-only lookup meant filing to a name
+    list_folders() itself reported (e.g. "Scouting/General") missed the real
+    child folder and created a bogus top-level one (donna-workspace#371)."""
+    token = _get_access_token()
+
+    folder_id = None
+    for part in folder_name.split("/"):
+        if part:
+            folder_id = _find_or_create_folder(token, part, folder_id)
+    if folder_id is None:
+        raise ValueError(f"move_to_folder: empty folder name {folder_name!r}")
 
     httpx.post(
         f"{GRAPH}/me/messages/{uid}/move",
@@ -682,6 +698,53 @@ def move_to_folder(uid: str, folder_name: str) -> None:
         timeout=10,
     ).raise_for_status()
     mark_read(uid)
+
+
+@retry_http
+def add_category(uid: str, category: str) -> None:
+    """Add a category to a message without touching its folder or read state
+    (donna-workspace#371: "Action Required" tags a message while it stays in
+    the inbox). Applies by name — needs only the mail scope; the account's
+    masterCategories list (which this token cannot read) controls the color."""
+    token = _get_access_token()
+    r = httpx.get(
+        f"{GRAPH}/me/messages/{uid}",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"$select": "categories"},
+        timeout=10,
+    )
+    r.raise_for_status()
+    cats = r.json().get("categories", []) or []
+    if category in cats:
+        return
+    httpx.patch(
+        f"{GRAPH}/me/messages/{uid}",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json={"categories": cats + [category]},
+        timeout=10,
+    ).raise_for_status()
+
+
+@retry_http
+def remove_category(uid: str, category: str) -> None:
+    """Remove a category from a message; folder and read state untouched."""
+    token = _get_access_token()
+    r = httpx.get(
+        f"{GRAPH}/me/messages/{uid}",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"$select": "categories"},
+        timeout=10,
+    )
+    r.raise_for_status()
+    cats = r.json().get("categories", []) or []
+    if category not in cats:
+        return
+    httpx.patch(
+        f"{GRAPH}/me/messages/{uid}",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json={"categories": [c for c in cats if c != category]},
+        timeout=10,
+    ).raise_for_status()
 
 
 @retry_http
