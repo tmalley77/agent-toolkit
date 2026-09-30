@@ -12,6 +12,14 @@ While this package is pre-1.0, a breaking change bumps the **minor** version.
 
 ## Unreleased
 
+## v0.2.1 — 2026-09-29
+
+- `gmail_client`/`gmail_imap`: `add_label()` / `remove_label()` — tag a message
+  without archiving or marking it read (donna-workspace#370's "Action Required"
+  needs the message to stay in the inbox; `apply_label` files it away).
+- `gmail_client`/`gmail_imap`: `purge_label_older_than()` — trash everything
+  under a label older than N days (the Promotions 30-day purge).
+
 ## v0.2.0 — 2026-09-20
 
 The first tagged release. `main` had moved eight commits past the `v0.1.0` the
