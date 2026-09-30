@@ -324,3 +324,32 @@ def test_get_message_raw_returns_forward_fields(imap_env):
     assert raw["from"] == "Jane Leader <jane@example.org>"
     assert raw["subject"] == "Campout headcount"
     assert "campout" in raw["body"].lower()
+
+
+def test_fetch_rfc822_returns_full_raw_bytes(imap_env):
+    conn = _mock_conn()
+    raw = b"From: a@b.c\r\nSubject: X\r\nContent-Type: image/png\r\n\r\nBYTES"
+    with patch.object(gi.imaplib, "IMAP4_SSL", return_value=conn), \
+         patch.object(gi, "_gm_uid_search", return_value=[b"42"]), \
+         patch.object(gi, "_fetch_full", return_value=({"msgid": 255}, raw)):
+        assert gi.fetch_rfc822("ff", token_env=ACCT) == raw
+
+
+def test_fetch_rfc822_missing_message_raises(imap_env):
+    conn = _mock_conn()
+    with patch.object(gi.imaplib, "IMAP4_SSL", return_value=conn), \
+         patch.object(gi, "_gm_uid_search", return_value=[]):
+        with pytest.raises(RuntimeError):
+            gi.fetch_rfc822("ff", token_env=ACCT)
+
+
+def test_send_mime_message_does_not_rewrite_headers(imap_env):
+    from email.mime.text import MIMEText
+    msg = MIMEText("hi")
+    msg["From"] = "relay@example.com"
+    msg["To"] = "troop@example.com"
+    sent = {}
+    with patch.object(gi, "_smtp_send", lambda env, m: sent.update(env=env, msg=m)):
+        gi.send_mime_message(msg, token_env=ACCT)
+    assert sent["msg"]["From"] == "relay@example.com"
+    assert sent["msg"]["To"] == "troop@example.com"

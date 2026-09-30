@@ -12,6 +12,13 @@ While this package is pre-1.0, a breaking change bumps the **minor** version.
 
 ## Unreleased
 
+## v0.2.5 — 2026-09-30
+
+- `gmail_client`/`gmail_imap`: `fetch_rfc822()` (full raw message bytes, every
+  MIME part intact) and `send_mime_message()` (send a caller-built MIME
+  message verbatim) — the Smoke Signals relay re-sends the council newsletter
+  with its inline images preserved (gretchen-workspace#31).
+
 ## v0.2.4 — 2026-09-30
 
 - `outlook_client.move_to_folder()`: folder names are now ALWAYS literal

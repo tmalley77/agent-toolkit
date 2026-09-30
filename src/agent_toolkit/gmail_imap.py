@@ -280,6 +280,28 @@ def list_labels(token_env: str = "GMAIL_TOKEN_TROOP") -> list[str]:
         return sorted(names)
 
 
+def fetch_rfc822(msg_id: str, token_env: str = "GMAIL_TOKEN_TROOP") -> bytes:
+    """Full raw RFC822 bytes of one message — every MIME part intact,
+    including inline images (gretchen-workspace#31: the Smoke Signals relay
+    re-sends the original message; the parsed get_message_raw below is
+    text-only and loses them)."""
+    with _imap(token_env) as conn:
+        conn.select(_q(_special_folder(conn, "\\All")), readonly=True)
+        uids = _gm_uid_search(conn, msg_id)
+        if not uids:
+            raise RuntimeError(f"Gmail message {msg_id} not found in All Mail")
+        got = _fetch_full(conn, uids[0])
+        if not got:
+            raise RuntimeError(f"Gmail message {msg_id} fetch failed")
+        return got[1]
+
+
+def send_mime_message(msg: Message, token_env: str = "GMAIL_TOKEN_TROOP") -> None:
+    """Send an already-built MIME message via the account's SMTP. The caller
+    owns the headers — this does not rewrite From/To."""
+    _smtp_send(token_env, msg)
+
+
 def get_message_raw(msg_id: str, token_env: str = "GMAIL_TOKEN_TROOP") -> dict:
     """Headers + plain body of one message, for forward composition."""
     with _imap(token_env) as conn:

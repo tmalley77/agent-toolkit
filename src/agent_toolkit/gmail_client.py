@@ -370,6 +370,24 @@ def remove_label(msg_id: str, label_name: str, token_env: str = "GMAIL_TOKEN_TRO
 
 
 @_imap_backed
+def fetch_rfc822(msg_id: str, token_env: str = "GMAIL_TOKEN_TROOP") -> bytes:
+    """Full raw RFC822 bytes of one message — every MIME part intact,
+    including inline images (gretchen-workspace#31)."""
+    service = _get_service(token_env)
+    m = service.users().messages().get(userId="me", id=msg_id, format="raw").execute()
+    return base64.urlsafe_b64decode(m["raw"])
+
+
+@_imap_backed
+def send_mime_message(msg, token_env: str = "GMAIL_TOKEN_TROOP") -> None:
+    """Send an already-built MIME message. The caller owns the headers —
+    this does not rewrite From/To."""
+    service = _get_service(token_env)
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    service.users().messages().send(userId="me", body={"raw": raw}).execute()
+
+
+@_imap_backed
 def purge_label_older_than(label_name: str, days: int,
                            token_env: str = "GMAIL_TOKEN_TROOP") -> int:
     """Trash every message under `label_name` older than `days` days
