@@ -193,6 +193,55 @@ def test_apply_label_creates_labels_and_clears_inbox_unread(imap_env):
     assert conn.uid.call_args_list[1][0] == ("STORE", "42", "+X-GM-LABELS", '("Troop 208")')
 
 
+def test_add_label_keeps_inbox_and_unread(imap_env):
+    # donna-workspace#370: "Action Required" tags a message while it stays in
+    # the inbox — no \Seen, no \Inbox removal.
+    conn = _mock_conn()
+    conn.uid.side_effect = [
+        ("OK", [b"42"]),  # SEARCH
+        ("OK", [b"42"]),  # +X-GM-LABELS
+    ]
+    with patch.object(gi.imaplib, "IMAP4_SSL", return_value=conn):
+        gi.add_label("ff", "Action Required", token_env=ACCT)
+    assert conn.uid.call_args_list[1][0] == ("STORE", "42", "+X-GM-LABELS", '("Action Required")')
+    assert conn.uid.call_count == 2  # nothing else touched
+
+
+def test_remove_label_strips_only_that_label(imap_env):
+    conn = _mock_conn()
+    conn.uid.side_effect = [
+        ("OK", [b"42"]),  # SEARCH
+        ("OK", [b"42"]),  # -X-GM-LABELS
+    ]
+    with patch.object(gi.imaplib, "IMAP4_SSL", return_value=conn):
+        gi.remove_label("ff", "Action Required", token_env=ACCT)
+    assert conn.uid.call_args_list[1][0] == ("STORE", "42", "-X-GM-LABELS", '("Action Required")')
+    assert conn.uid.call_count == 2
+
+
+def test_purge_label_older_than_trashes_matches(imap_env):
+    conn = _mock_conn()
+    conn.uid.side_effect = [
+        ("OK", [b"7 9"]),   # SEARCH BEFORE
+        ("OK", [b"7"]),     # COPY 7 -> Trash
+        ("OK", [b"9"]),     # COPY 9 -> Trash
+    ]
+    with patch.object(gi.imaplib, "IMAP4_SSL", return_value=conn):
+        assert gi.purge_label_older_than("Promotions", 30, token_env=ACCT) == 2
+    conn.select.assert_called_with('"Promotions"')
+    assert conn.uid.call_args_list[0][0][:2] == ("SEARCH", "BEFORE")
+    assert conn.uid.call_args_list[1][0][:2] == ("COPY", "7")
+    assert conn.uid.call_args_list[2][0][:2] == ("COPY", "9")
+
+
+def test_purge_label_missing_folder_is_zero(imap_env):
+    conn = _mock_conn()
+    conn.select.return_value = ("NO", [b"nonexistent"])
+    with patch.object(gi.imaplib, "IMAP4_SSL", return_value=conn):
+        assert gi.purge_label_older_than("Promotions", 30, token_env=ACCT) == 0
+    conn.uid.assert_not_called()
+
+
 # --------------------------------------------------------------------- #
 # Send + drafts
 # --------------------------------------------------------------------- #

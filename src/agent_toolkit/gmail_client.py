@@ -332,6 +332,61 @@ def apply_label(msg_id: str, label_name: str, token_env: str = "GMAIL_TOKEN_TROO
     ).execute()
 
 
+def _resolve_label_id(service, label_name: str, create: bool = False) -> str | None:
+    labels = service.users().labels().list(userId="me").execute().get("labels", [])
+    for lbl in labels:
+        if lbl["name"].lower() == label_name.lower():
+            return lbl["id"]
+    if create:
+        created = service.users().labels().create(
+            userId="me", body={"name": label_name, "labelListVisibility": "labelShow"},
+        ).execute()
+        return created["id"]
+    return None
+
+
+@_imap_backed
+def add_label(msg_id: str, label_name: str, token_env: str = "GMAIL_TOKEN_TROOP") -> None:
+    """Apply a label WITHOUT archiving or marking read — the message keeps its
+    inbox/unread state (donna-workspace#370). Creates the label if missing."""
+    service = _get_service(token_env)
+    label_id = _resolve_label_id(service, label_name, create=True)
+    service.users().messages().modify(
+        userId="me", id=msg_id, body={"addLabelIds": [label_id]},
+    ).execute()
+
+
+@_imap_backed
+def remove_label(msg_id: str, label_name: str, token_env: str = "GMAIL_TOKEN_TROOP") -> None:
+    """Remove a label from a message; inbox/unread state untouched. A label
+    that doesn't exist is a no-op, not an error."""
+    service = _get_service(token_env)
+    label_id = _resolve_label_id(service, label_name)
+    if not label_id:
+        return
+    service.users().messages().modify(
+        userId="me", id=msg_id, body={"removeLabelIds": [label_id]},
+    ).execute()
+
+
+@_imap_backed
+def purge_label_older_than(label_name: str, days: int,
+                           token_env: str = "GMAIL_TOKEN_TROOP") -> int:
+    """Trash every message under `label_name` older than `days` days
+    (donna-workspace#370: Promotions auto-purge). Returns count trashed."""
+    service = _get_service(token_env)
+    label_id = _resolve_label_id(service, label_name)
+    if not label_id:
+        return 0
+    resp = service.users().messages().list(
+        userId="me", labelIds=[label_id], q=f"older_than:{days}d", maxResults=500,
+    ).execute()
+    ids = [m["id"] for m in resp.get("messages", [])]
+    for mid in ids:
+        service.users().messages().trash(userId="me", id=mid).execute()
+    return len(ids)
+
+
 @_imap_backed
 def send_message(
     to_address: str,

@@ -38,7 +38,7 @@ import re
 import smtplib
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email import message_from_bytes
 from email.message import Message
 from email.mime.multipart import MIMEMultipart
@@ -345,6 +345,49 @@ def apply_label(msg_id: str, label_name: str, token_env: str = "GMAIL_TOKEN_TROO
         conn.uid("STORE", uid, "+FLAGS", r"(\Seen)")
         conn.uid("STORE", uid, "-X-GM-LABELS", r"(\Inbox)")
     _mutate(token_env, msg_id, "apply_label", _label)
+
+
+def add_label(msg_id: str, label_name: str, token_env: str = "GMAIL_TOKEN_TROOP") -> None:
+    """Apply a label WITHOUT archiving or marking read — the message keeps its
+    inbox/unread state (donna-workspace#370: "Action Required" flags a thread
+    while it stays in the inbox, unlike apply_label's file-away semantics)."""
+    def _label(conn, uid):
+        conn.create(_q(label_name))  # NO if it already exists — fine
+        typ, _ = conn.uid("STORE", uid, "+X-GM-LABELS", f"({_q(label_name)})")
+        if typ != "OK":
+            raise RuntimeError(f"add_label {label_name!r} failed for {uid}")
+    _mutate(token_env, msg_id, "add_label", _label)
+
+
+def remove_label(msg_id: str, label_name: str, token_env: str = "GMAIL_TOKEN_TROOP") -> None:
+    """Remove a label from a message; inbox/unread state untouched."""
+    _mutate(token_env, msg_id, "remove_label",
+            lambda conn, uid: conn.uid("STORE", uid, "-X-GM-LABELS", f"({_q(label_name)})"))
+
+
+def purge_label_older_than(label_name: str, days: int,
+                           token_env: str = "GMAIL_TOKEN_TROOP") -> int:
+    """Trash every message under `label_name` older than `days` days
+    (donna-workspace#370: Promotions auto-purge). Returns count trashed.
+    A missing label/folder is 0, not an error."""
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%d-%b-%Y")
+    with _imap(token_env) as conn:
+        typ, _ = conn.select(_q(label_name))
+        if typ != "OK":
+            log.info("gmail_imap.purge_label_older_than: no folder %r, nothing to purge", label_name)
+            return 0
+        typ, data = conn.uid("SEARCH", "BEFORE", cutoff)
+        if typ != "OK" or not data or not data[0]:
+            return 0
+        trash = _special_folder(conn, "\\Trash")
+        count = 0
+        for uid in data[0].split():
+            uid = uid.decode() if isinstance(uid, bytes) else str(uid)
+            typ, _ = conn.uid("COPY", uid, _q(trash))
+            if typ != "OK":
+                raise RuntimeError(f"COPY to {trash} failed for {label_name} uid {uid}")
+            count += 1
+        return count
 
 
 # --------------------------------------------------------------------- #
