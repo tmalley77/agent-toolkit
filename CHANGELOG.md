@@ -12,6 +12,14 @@ While this package is pre-1.0, a breaking change bumps the **minor** version.
 
 ## Unreleased
 
+## v0.2.4 — 2026-09-30
+
+- `outlook_client.move_to_folder()`: folder names are now ALWAYS literal
+  displayNames, never path-split (Tom, donna-workspace#371: "just use
+  Scouting/General only to prevent overlap"). v0.2.3's path-split fallback
+  could recreate a nested Scouting→General tree beside the real slashed-name
+  folder on a lookup miss; a missing slashed name is now created literally.
+
 ## v0.2.3 — 2026-09-30
 
 - `outlook_client.move_to_folder()`: try a slashed name as a LITERAL top-level

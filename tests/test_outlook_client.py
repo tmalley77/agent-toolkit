@@ -141,54 +141,30 @@ def test_remove_category_absent_is_noop(_tok):
 
 @patch.object(oc, "mark_read")
 @patch.object(oc, "_get_access_token", return_value="tok")
-def test_move_to_folder_prefers_literal_slashed_name(_tok, _mr):
-    # Tom's mailbox has a real top-level folder NAMED "Scouting/General"
-    # (Outlook allows "/" in displayName) -- the literal match must win
-    # before any path splitting, or filing recreates a nested tree.
-    gets = [
-        _resp({"value": [{"id": "F-literal", "displayName": "Scouting/General"}]}),
-    ]
-    with patch.object(oc.httpx, "get", side_effect=gets), \
+def test_move_to_folder_slashed_name_is_literal(_tok, _mr):
+    # Tom's "Scouting/General" is one top-level folder with "/" in its
+    # displayName (#371, Tom: literal only, "to prevent overlap") -- the
+    # name must never be path-split into a nested Scouting -> General tree.
+    with patch.object(oc.httpx, "get", return_value=_resp({"value": [{"id": "F-literal", "displayName": "Scouting/General"}]})) as g, \
          patch.object(oc.httpx, "post", return_value=_resp({})) as p:
         oc.move_to_folder("m1", "Scouting/General")
+    assert len(g.call_args_list) == 1  # one top-level lookup, no child walk
     assert p.call_args.kwargs["json"] == {"destinationId": "F-literal"}
 
 
 @patch.object(oc, "mark_read")
 @patch.object(oc, "_get_access_token", return_value="tok")
-def test_move_to_folder_resolves_parent_child_path(_tok, _mr):
-    # No literal "Scouting/General" folder: falls back to path resolution --
-    # the old top-level-only lookup missed the child and created a bogus
-    # top-level folder named "Scouting/General".
-    gets = [
-        _resp({"value": []}),  # no literal slashed-name match
-        _resp({"value": [{"id": "F-scouting", "displayName": "Scouting"}]}),
-        _resp({"value": [{"id": "F-general", "displayName": "General"}]}),
-    ]
-    with patch.object(oc.httpx, "get", side_effect=gets) as g, \
-         patch.object(oc.httpx, "post", return_value=_resp({})) as p:
-        oc.move_to_folder("m1", "Scouting/General")
-    assert "F-scouting/childFolders" in g.call_args_list[2][0][0]
-    assert p.call_args.kwargs["json"] == {"destinationId": "F-general"}
-
-
-@patch.object(oc, "mark_read")
-@patch.object(oc, "_get_access_token", return_value="tok")
-def test_move_to_folder_creates_missing_child_under_parent(_tok, _mr):
-    gets = [
-        _resp({"value": []}),  # no literal slashed-name match
-        _resp({"value": [{"id": "F-scouting", "displayName": "Scouting"}]}),
-        _resp({"value": []}),  # child missing
-    ]
+def test_move_to_folder_missing_slashed_name_created_literally(_tok, _mr):
     posts = [
-        _resp({"id": "F-new-child"}),  # created under parent
-        _resp({}),                     # the move
+        _resp({"id": "F-created"}),  # created top-level, slash included
+        _resp({}),                   # the move
     ]
-    with patch.object(oc.httpx, "get", side_effect=gets), \
+    with patch.object(oc.httpx, "get", return_value=_resp({"value": []})), \
          patch.object(oc.httpx, "post", side_effect=posts) as p:
         oc.move_to_folder("m1", "Scouting/General")
-    assert "F-scouting/childFolders" in p.call_args_list[0][0][0]
-    assert p.call_args_list[1].kwargs["json"] == {"destinationId": "F-new-child"}
+    assert p.call_args_list[0][0][0].endswith("/me/mailFolders")  # top level
+    assert p.call_args_list[0].kwargs["json"]["displayName"] == "Scouting/General"
+    assert p.call_args_list[1].kwargs["json"] == {"destinationId": "F-created"}
 
 
 @patch.object(oc, "mark_read")
