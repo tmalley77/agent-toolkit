@@ -141,18 +141,34 @@ def test_remove_category_absent_is_noop(_tok):
 
 @patch.object(oc, "mark_read")
 @patch.object(oc, "_get_access_token", return_value="tok")
+def test_move_to_folder_prefers_literal_slashed_name(_tok, _mr):
+    # Tom's mailbox has a real top-level folder NAMED "Scouting/General"
+    # (Outlook allows "/" in displayName) -- the literal match must win
+    # before any path splitting, or filing recreates a nested tree.
+    gets = [
+        _resp({"value": [{"id": "F-literal", "displayName": "Scouting/General"}]}),
+    ]
+    with patch.object(oc.httpx, "get", side_effect=gets), \
+         patch.object(oc.httpx, "post", return_value=_resp({})) as p:
+        oc.move_to_folder("m1", "Scouting/General")
+    assert p.call_args.kwargs["json"] == {"destinationId": "F-literal"}
+
+
+@patch.object(oc, "mark_read")
+@patch.object(oc, "_get_access_token", return_value="tok")
 def test_move_to_folder_resolves_parent_child_path(_tok, _mr):
-    # "Scouting/General": parent found top-level, child found under it --
+    # No literal "Scouting/General" folder: falls back to path resolution --
     # the old top-level-only lookup missed the child and created a bogus
     # top-level folder named "Scouting/General".
     gets = [
+        _resp({"value": []}),  # no literal slashed-name match
         _resp({"value": [{"id": "F-scouting", "displayName": "Scouting"}]}),
         _resp({"value": [{"id": "F-general", "displayName": "General"}]}),
     ]
     with patch.object(oc.httpx, "get", side_effect=gets) as g, \
          patch.object(oc.httpx, "post", return_value=_resp({})) as p:
         oc.move_to_folder("m1", "Scouting/General")
-    assert "F-scouting/childFolders" in g.call_args_list[1][0][0]
+    assert "F-scouting/childFolders" in g.call_args_list[2][0][0]
     assert p.call_args.kwargs["json"] == {"destinationId": "F-general"}
 
 
@@ -160,6 +176,7 @@ def test_move_to_folder_resolves_parent_child_path(_tok, _mr):
 @patch.object(oc, "_get_access_token", return_value="tok")
 def test_move_to_folder_creates_missing_child_under_parent(_tok, _mr):
     gets = [
+        _resp({"value": []}),  # no literal slashed-name match
         _resp({"value": [{"id": "F-scouting", "displayName": "Scouting"}]}),
         _resp({"value": []}),  # child missing
     ]

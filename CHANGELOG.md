@@ -12,6 +12,13 @@ While this package is pre-1.0, a breaking change bumps the **minor** version.
 
 ## Unreleased
 
+## v0.2.3 — 2026-09-30
+
+- `outlook_client.move_to_folder()`: try a slashed name as a LITERAL top-level
+  displayName before path-splitting — Outlook allows "/" in folder names and
+  Tom's mailbox has a real top-level "Scouting/General"; v0.2.2's path
+  resolution alone would have recreated a nested tree beside it.
+
 ## v0.2.2 — 2026-09-30
 
 - `outlook_client`: `add_category()` / `remove_category()` — tag a message by

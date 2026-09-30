@@ -675,19 +675,38 @@ def _find_or_create_folder(token: str, name: str, parent_id: str | None = None) 
     return r.json()["id"]
 
 
+def _find_folder(token: str, name: str, parent_id: str | None = None) -> str | None:
+    """Folder id by exact displayName under `parent_id` (top level when None),
+    or None. Never creates."""
+    base = (f"{GRAPH}/me/mailFolders/{parent_id}/childFolders"
+            if parent_id else f"{GRAPH}/me/mailFolders")
+    r = httpx.get(
+        base,
+        headers={"Authorization": f"Bearer {token}"},
+        params={"$filter": f"displayName eq '{name}'"},
+        timeout=10,
+    )
+    r.raise_for_status()
+    folders = r.json().get("value", [])
+    return folders[0]["id"] if folders else None
+
+
 def move_to_folder(uid: str, folder_name: str) -> None:
     """Move a message to a named folder, creating it if it doesn't exist.
 
-    `folder_name` may be a "Parent/Child" path, matching how list_folders()
-    renders nesting — the old top-level-only lookup meant filing to a name
-    list_folders() itself reported (e.g. "Scouting/General") missed the real
-    child folder and created a bogus top-level one (donna-workspace#371)."""
+    A slashed name is FIRST tried as a literal top-level displayName —
+    Outlook allows "/" in folder names and Tom's mailbox really has a
+    top-level "Scouting/General" (donna-workspace#371). Only when no literal
+    match exists is it resolved as a "Parent/Child" path, matching how
+    list_folders() renders true nesting — the old top-level-only lookup
+    missed nested folders and created a bogus top-level one."""
     token = _get_access_token()
 
-    folder_id = None
-    for part in folder_name.split("/"):
-        if part:
-            folder_id = _find_or_create_folder(token, part, folder_id)
+    folder_id = _find_folder(token, folder_name)
+    if folder_id is None:
+        for part in folder_name.split("/"):
+            if part:
+                folder_id = _find_or_create_folder(token, part, folder_id)
     if folder_id is None:
         raise ValueError(f"move_to_folder: empty folder name {folder_name!r}")
 
