@@ -65,9 +65,39 @@ def test_update_env_uses_outlook_env_path_not_module_relative_path(tmp_path, mon
     assert "OTHER_VAR=untouched" in content
 
 
-def test_update_env_noop_when_file_missing(tmp_path, monkeypatch):
-    monkeypatch.setenv("OUTLOOK_ENV_PATH", str(tmp_path / "does-not-exist.env"))
-    oc._update_env("OUTLOOK_REFRESH_TOKEN", "new-token")  # does not raise
+def test_update_env_creates_store_when_file_missing(tmp_path, monkeypatch):
+    """The rotation store is created rather than skipped.
+
+    This used to no-op, on the reasoning that a missing file meant the env
+    vars came purely from the process environment. That is exactly Donna's
+    case -- compose supplies them via `env_file:` and nothing is bind-mounted
+    -- so every refresh token Microsoft rotated was silently dropped, leaving
+    the original grant in place until it was revoked (donna-workspace#373).
+    """
+    store = tmp_path / "outlook_token.env"
+    monkeypatch.setenv("OUTLOOK_ENV_PATH", str(store))
+
+    oc._update_env("OUTLOOK_REFRESH_TOKEN", "new-token")
+
+    assert store.exists()
+    assert "OUTLOOK_REFRESH_TOKEN=new-token" in store.read_text()
+
+
+def test_update_env_warns_and_does_not_raise_when_store_unwritable(tmp_path, monkeypatch, caplog):
+    """A credential that cannot be persisted must say so, not fail silently.
+
+    It must not raise either: the access token in hand is still good, and
+    taking down mail delivery over a failed write would be worse than the
+    stale store it leaves behind.
+    """
+    monkeypatch.setenv("OUTLOOK_ENV_PATH", str(tmp_path / "no-such-dir" / "token.env"))
+
+    with caplog.at_level("WARNING"):
+        oc._update_env("OUTLOOK_REFRESH_TOKEN", "new-token")  # does not raise
+
+    assert any("rotated" in r.message.lower() for r in caplog.records), caplog.text
+    # never log the credential itself
+    assert "new-token" not in caplog.text
 
 
 def test_get_access_token_persists_rotated_refresh_token(tmp_path, monkeypatch):
@@ -89,6 +119,123 @@ def test_get_access_token_persists_rotated_refresh_token(tmp_path, monkeypatch):
     assert token == "access-123"
     assert os.environ["OUTLOOK_REFRESH_TOKEN"] == "rotated-token"
     assert "OUTLOOK_REFRESH_TOKEN=rotated-token" in env_file.read_text()
+
+
+# --------------------------------------------------------------------- #
+# Rotation store precedence and re-mint recovery (donna-workspace#373)
+# --------------------------------------------------------------------- #
+
+def _token_response(status, body):
+    return httpx.Response(status, json=body, request=httpx.Request("POST", oc.TOKEN_URL))
+
+
+def _invalid_grant():
+    return _token_response(400, {
+        "error": "invalid_grant",
+        "error_description": "AADSTS70000: The user could not be authenticated as the grant is expired.",
+    })
+
+
+def test_stored_token_is_preferred_over_the_env_seed(tmp_path, monkeypatch):
+    """The store is the live value; the env var is only the seed.
+
+    Job containers are ephemeral and get OUTLOOK_REFRESH_TOKEN fresh from
+    `env_file:` on every start, so the env var goes stale the moment Microsoft
+    rotates. Whatever the last run persisted has to win.
+    """
+    store = tmp_path / "outlook_token.env"
+    store.write_text("OUTLOOK_REFRESH_TOKEN=rotated-by-last-run\n")
+    monkeypatch.setenv("OUTLOOK_ENV_PATH", str(store))
+    monkeypatch.setenv("OUTLOOK_REFRESH_TOKEN", "stale-seed-from-env-file")
+
+    sent = []
+
+    def fake_post(url, data=None, **kw):
+        sent.append(data["refresh_token"])
+        return _token_response(200, {"access_token": "access-123"})
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    assert oc._get_access_token() == "access-123"
+    assert sent == ["rotated-by-last-run"]
+
+
+def test_falls_back_to_env_seed_when_stored_token_is_dead(tmp_path, monkeypatch):
+    """A re-mint writes the env file, not the store — so the store goes dead.
+
+    After Tom re-mints interactively, the store still holds the revoked token.
+    Without this fallback the fix would be inert until someone deleted the
+    store by hand, which is precisely the kind of undocumented step that
+    turns a five-minute recovery into an outage.
+    """
+    store = tmp_path / "outlook_token.env"
+    store.write_text("OUTLOOK_REFRESH_TOKEN=revoked-token\n")
+    monkeypatch.setenv("OUTLOOK_ENV_PATH", str(store))
+    monkeypatch.setenv("OUTLOOK_REFRESH_TOKEN", "freshly-minted")
+
+    sent = []
+
+    def fake_post(url, data=None, **kw):
+        rt = data["refresh_token"]
+        sent.append(rt)
+        if rt == "revoked-token":
+            return _invalid_grant()
+        return _token_response(200, {"access_token": "access-123", "refresh_token": "rotated-again"})
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    assert oc._get_access_token() == "access-123"
+    assert sent == ["revoked-token", "freshly-minted"]
+    # recovery is persisted, so the next run starts from the good token
+    assert "OUTLOOK_REFRESH_TOKEN=rotated-again" in store.read_text()
+
+
+def test_invalid_grant_on_the_env_seed_propagates(tmp_path, monkeypatch):
+    """Both tokens dead means genuine re-consent — it must fail loudly."""
+    store = tmp_path / "outlook_token.env"
+    store.write_text("OUTLOOK_REFRESH_TOKEN=revoked-token\n")
+    monkeypatch.setenv("OUTLOOK_ENV_PATH", str(store))
+    monkeypatch.setenv("OUTLOOK_REFRESH_TOKEN", "also-revoked")
+
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _invalid_grant())
+
+    with pytest.raises(httpx.HTTPStatusError):
+        oc._get_access_token()
+
+
+def test_only_one_exchange_when_store_matches_the_env_seed(tmp_path, monkeypatch):
+    """No pointless second attempt with an identical token."""
+    store = tmp_path / "outlook_token.env"
+    store.write_text("OUTLOOK_REFRESH_TOKEN=same-token\n")
+    monkeypatch.setenv("OUTLOOK_ENV_PATH", str(store))
+    monkeypatch.setenv("OUTLOOK_REFRESH_TOKEN", "same-token")
+
+    calls = []
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: (calls.append(1), _invalid_grant())[1])
+
+    with pytest.raises(httpx.HTTPStatusError):
+        oc._get_access_token()
+    assert len(calls) == 1
+
+
+def test_non_auth_http_error_is_not_retried_with_the_seed(tmp_path, monkeypatch):
+    """A 500 from the token endpoint is not a dead credential."""
+    store = tmp_path / "outlook_token.env"
+    store.write_text("OUTLOOK_REFRESH_TOKEN=stored\n")
+    monkeypatch.setenv("OUTLOOK_ENV_PATH", str(store))
+    monkeypatch.setenv("OUTLOOK_REFRESH_TOKEN", "seed")
+
+    calls = []
+
+    def fake_post(url, data=None, **kw):
+        calls.append(data["refresh_token"])
+        return _token_response(500, {"error": "server_error"})
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        oc._get_access_token()
+    assert calls == ["stored"]
 
 
 # --------------------------------------------------------------------- #

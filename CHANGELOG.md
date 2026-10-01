@@ -12,6 +12,41 @@ While this package is pre-1.0, a breaking change bumps the **minor** version.
 
 ## Unreleased
 
+## v0.3.0 — 2026-10-01
+
+Minor bump because the refresh-token precedence changes for all five consumers:
+the rotation store now wins over `OUTLOOK_REFRESH_TOKEN` in the environment.
+
+- `outlook_client._update_env()`: **creates the rotation store instead of
+  skipping it.** It used to return early when the path did not exist, reading
+  that as "env vars came purely from the process environment" — which is
+  exactly how Donna is configured (compose `env_file:`, nothing bind-mounted,
+  `.env` excluded by `.dockerignore`). Every refresh token Microsoft rotated
+  was therefore dropped on the floor, the original grant stood untouched for
+  the life of the deployment, and the credential only ever changed when it was
+  revoked (donna-workspace#373). Same bug class as donna-workspace#109, which
+  fixed one code path and left this one.
+- A store that cannot be written now logs a warning naming `OUTLOOK_ENV_PATH`
+  instead of failing silently. It still does not raise: the access token in
+  hand is good, and taking mail down over a failed write is worse than the
+  stale store it leaves behind.
+- `outlook_client._get_access_token()`: reads the refresh token from the store
+  first, falling back to `OUTLOOK_REFRESH_TOKEN` once on `invalid_grant`. The
+  fallback is the re-mint path — `get_outlook_token.py` writes the env file,
+  not the store, so after a revocation the store holds the revoked value and
+  only the environment has a good one. Without it the store would have to be
+  deleted by hand after every re-consent.
+- Non-auth token-endpoint errors (500s) no longer trigger that fallback, and a
+  store equal to the env seed is not redeemed twice.
+- The single-key rewrite now substitutes via a callable, so a literal
+  backslash in a credential can no longer be read as a group reference.
+
+**Consumers must point `OUTLOOK_ENV_PATH` at a writable, persistent
+directory.** A single-file bind mount cannot host the store: the atomic
+replace needs its temp file in the target's own directory, and under a
+file mount that directory is inside the container, so the write never
+reaches the host. Mount a directory.
+
 ## v0.2.5 — 2026-09-30
 
 - `gmail_client`/`gmail_imap`: `fetch_rfc822()` (full raw message bytes, every

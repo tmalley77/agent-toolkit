@@ -68,7 +68,13 @@ Pre-1.0, a breaking change bumps the **minor** version.
   refresh). One env var beyond the source it was ported from:
   `OUTLOOK_ENV_PATH` (default `.env` in the cwd) — the original located its
   env file via a path relative to its own source file, which breaks once
-  this lives in an installed package.
+  this lives in an installed package. **Point it at a writable, persistent
+  directory**: Microsoft rotates the refresh token on every redemption, and
+  since v0.3.0 the store is created if absent and read in preference to
+  `OUTLOOK_REFRESH_TOKEN`, which is only the seed from the last interactive
+  consent. A single-file bind mount cannot host it — the atomic replace needs
+  its temp file in the target's own directory, which under a file mount is
+  inside the container. Mount a directory.
 - `agent_toolkit.gmail_client` — Gmail REST API client (fetch/search/send/
   reply/draft/quoted-reply, OAuth token refresh with cross-process file
   locking). `GMAIL_TOKEN_DIR` (default cwd) replaces the same kind of

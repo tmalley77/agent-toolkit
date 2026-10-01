@@ -11,21 +11,39 @@ Required env vars (per consumer):
   OUTLOOK_REFRESH_TOKEN — from a one-time OAuth setup script
 
 Optional:
-  OUTLOOK_ENV_PATH — path to the .env file to rewrite when the refresh
-    token rotates. Defaults to ".env" in the current working directory.
+  OUTLOOK_ENV_PATH — the rotation store: the file rewritten when Microsoft
+    rotates the refresh token, and read in preference to
+    OUTLOOK_REFRESH_TOKEN. Defaults to ".env" in the current working
+    directory. Created if absent.
     (Ported from ClaudeAIScoutMaster's app/outlook_client.py, which located
     this via a `__file__`-relative path into its own repo root — that
     breaks once this module lives in an installed package, hence the env
     var. See ClaudeAIScoutMaster#277.)
+
+    It must live on a writable, persistent **directory** mount. The atomic
+    replace puts its temp file in the target's own directory, so a
+    single-file bind mount leaves the write inside the container where it
+    never reaches the host. Point this at a mounted data directory, not at
+    a file mounted on its own.
+
+OUTLOOK_REFRESH_TOKEN is the seed from the last interactive consent, not the
+live value. Containers are handed it afresh from `env_file:` on every start,
+so it goes stale the moment Microsoft rotates; the store is what carries the
+credential forward. A dead store falls back to the seed once, which is how a
+re-mint recovers (see _get_access_token). donna-workspace#373.
 """
 import os
 import re
 import html
+import logging
+import tempfile
 import httpx
 from datetime import datetime
 from typing import Optional
 
 from agent_toolkit.http_retry import retry_http
+
+log = logging.getLogger(__name__)
 
 GRAPH = "https://graph.microsoft.com/v1.0"
 TOKEN_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
@@ -74,11 +92,38 @@ def _cfg() -> tuple[str, str, str]:
     return addr, client_id, refresh_token
 
 
-@retry_http
-def _get_access_token() -> str:
-    """Exchange the refresh token for a short-lived access token.
-    If Microsoft rotates the refresh token, updates the env file automatically."""
-    _, client_id, refresh_token = _cfg()
+def _store_path() -> str:
+    """Where the rotating refresh token is persisted.
+
+    Still called OUTLOOK_ENV_PATH because that is what it has always been —
+    "the env file to rewrite" — and some consumers point it at a real .env
+    holding other keys, which the single-key rewrite below preserves.
+    """
+    return os.getenv("OUTLOOK_ENV_PATH", ".env")
+
+
+def _read_stored(key: str) -> str:
+    """Read one key out of the rotation store. Empty string if unavailable."""
+    try:
+        with open(_store_path(), "r") as f:
+            content = f.read()
+    except OSError:
+        return ""
+    m = re.search(rf"^{re.escape(key)}=(.*)$", content, re.MULTILINE)
+    return m.group(1).strip().strip('"').strip("'") if m else ""
+
+
+def _is_invalid_grant(exc: httpx.HTTPStatusError) -> bool:
+    """True for a dead credential, as opposed to any other token-endpoint 400."""
+    if exc.response.status_code != 400:
+        return False
+    try:
+        return exc.response.json().get("error") == "invalid_grant"
+    except ValueError:
+        return "invalid_grant" in exc.response.text
+
+
+def _redeem(client_id: str, refresh_token: str) -> str:
     r = httpx.post(
         TOKEN_URL,
         data={
@@ -101,30 +146,88 @@ def _get_access_token() -> str:
     return access_token
 
 
-def _update_env(key: str, value: str) -> None:
-    """Update a single key in the env file without disturbing other lines.
+@retry_http
+def _get_access_token() -> str:
+    """Exchange the refresh token for a short-lived access token.
 
-    Uses atomic write (temp file + os.replace) to prevent corruption if the
-    process is killed mid-write. No-ops if the file doesn't exist (e.g. env
-    vars supplied purely via the process environment).
+    The store wins over the environment, because Microsoft rotates the refresh
+    token on redemption and job containers are ephemeral — each one is handed
+    OUTLOOK_REFRESH_TOKEN afresh from `env_file:`, so the env var is only ever
+    the seed from the last interactive consent.
+
+    A dead stored token falls back to that seed once. That is the re-mint path:
+    `get_outlook_token.py` writes the env file, not the store, so after a
+    revocation the store holds the revoked value and only the seed is good.
+    Without the fallback the store would have to be deleted by hand.
     """
-    env_path = os.getenv("OUTLOOK_ENV_PATH", ".env")
-    if not os.path.exists(env_path):
-        return
-    with open(env_path, "r") as f:
-        content = f.read()
-    pattern = rf"^{re.escape(key)}=.*$"
-    replacement = f"{key}={value}"
-    if re.search(pattern, content, re.MULTILINE):
-        content = re.sub(pattern, replacement, content, flags=re.MULTILINE)
-    else:
-        content = content.rstrip("\n") + f"\n{replacement}\n"
-    tmp_path = env_path + ".tmp"
-    with open(tmp_path, "w") as f:
-        f.write(content)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp_path, env_path)
+    _, client_id, seed = _cfg()
+    stored = _read_stored("OUTLOOK_REFRESH_TOKEN")
+    candidates = [stored, seed] if stored and stored != seed else [stored or seed]
+
+    for i, refresh_token in enumerate(candidates):
+        try:
+            return _redeem(client_id, refresh_token)
+        except httpx.HTTPStatusError as e:
+            if i + 1 >= len(candidates) or not _is_invalid_grant(e):
+                raise
+            log.warning(
+                "the Outlook refresh token in %s was rejected (invalid_grant); "
+                "retrying with OUTLOOK_REFRESH_TOKEN from the environment",
+                _store_path(),
+            )
+    raise AssertionError("unreachable: candidates is never empty")
+
+
+def _update_env(key: str, value: str) -> None:
+    """Persist a rotated credential, creating the store if it is not there yet.
+
+    Atomic (temp file + os.replace) so a kill mid-write cannot corrupt it. The
+    temp file has to live in the target's own directory for the replace to work,
+    which is also why a single-file bind mount cannot host this — that directory
+    is then inside the container and the replace never reaches the host.
+
+    This used to return early when the file was missing, treating that as "env
+    vars came purely from the process environment". That is Donna's exact
+    setup, so every token Microsoft rotated was dropped on the floor and the
+    original grant stood until it was revoked — donna-workspace#373.
+    """
+    path = _store_path()
+    try:
+        content = ""
+        if os.path.exists(path):
+            with open(path, "r") as f:
+                content = f.read()
+
+        line = f"{key}={value}"
+        pattern = rf"^{re.escape(key)}=.*$"
+        if re.search(pattern, content, re.MULTILINE):
+            # lambda, not a replacement string: a literal backslash in a
+            # credential would otherwise be read as a group reference.
+            content = re.sub(pattern, lambda _: line, content, flags=re.MULTILINE)
+        else:
+            content = (content.rstrip("\n") + "\n" + line + "\n").lstrip("\n")
+
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(path)))
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, path)
+        except BaseException:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+            raise
+    except OSError as e:
+        log.warning(
+            "could not persist the rotated Outlook refresh token to %s (%s). The "
+            "next run falls back to OUTLOOK_REFRESH_TOKEN from the environment, "
+            "which goes stale on every rotation and eventually expires. Point "
+            "OUTLOOK_ENV_PATH at a writable, persistent directory.",
+            path,
+            e,
+        )
 
 
 def _html_to_text(raw: str) -> str:
